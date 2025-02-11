@@ -1,5 +1,4 @@
 
-
 import os
 import sys
 sys.path.append(os.getcwd())
@@ -14,11 +13,7 @@ import torch.nn.functional as F
 
 import survPred.config as config
 
-# when kernel_size is odd, stride is even, e.g. k=3,s=2, output size is floor() of the (w-k+2p)/2+1.因此，为了使得k is odd, s=2时输出尺寸是输入尺寸的1/2，使用自定义的Conv3dSame替换Conv3d。
 class Conv3dSame(torch.nn.Conv3d):
-    # will cause extra GPU memory cost with a padded x. so Chao suggest to use it only for stride>1. if still OOM, replace Conv3dSame(stride=2) with maxpooling.
-    # output size: math.ceil(i / s)
-    # works for any kernel_size, stride, dilation
     # modified from Conv2dSame in :https://github.com/pytorch/pytorch/issues/67551
     def calc_same_pad(self, i: int, k: int, s: int, d: int) -> int:
         return max((math.ceil(i / s) - 1) * s + (k - 1) * d + 1 - i, 0)
@@ -45,9 +40,6 @@ class Conv3dSame(torch.nn.Conv3d):
         )
 
 class Conv2dSame(torch.nn.Conv2d):
-    # will cause extra GPU memory cost with a padded x. so Chao suggest to use it only for stride>1. if still OOM, replace Conv3dSame(stride=2) with maxpooling.
-    # output size: math.ceil(i / s)
-    # works for any kernel_size, stride, dilation
     # modified from Conv2dSame in :https://github.com/pytorch/pytorch/issues/67551
     def calc_same_pad(self, i: int, k: int, s: int, d: int) -> int:
         return max((math.ceil(i / s) - 1) * s + (k - 1) * d + 1 - i, 0)
@@ -98,12 +90,6 @@ class channelAttention(nn.Module):
         super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool3d(1) # out: one signal for each channel for each batch sample
         self.max_pool = nn.AdaptiveMaxPool3d(1)# out: one signal for each channel for each batch sample
-        # self.fc = nn.Sequential(
-        #     nn.Linear(channel, channel // reduction, bias=False),
-        #     nn.ReLU(inplace=True),
-        #     nn.Linear(channel // reduction, channel, bias=False),
-        #     nn.Sigmoid()
-        # )
         self.sigmoid = nn.Sigmoid()
         self.act = nn.ReLU(inplace=True)
 
@@ -117,14 +103,9 @@ class channelAttention(nn.Module):
 
         maxpool_weight_tmp = self.max_pool(avgpool_feature)
         maxpool_weight = self.sigmoid(maxpool_weight_tmp)
-        # maxpool_weight = self.softmax(maxpool_weight_tmp)
-        # maxpool_weight = torch.mul(maxpool_weight_tmp,x) # reinforcement
-        # maxpool_weight = self.softmax(maxpool_weight)
 
-        # out = self.act(avgpool_feature)
         out = torch.mul(maxpool_weight,x) + x
-        # y = self.fc(y).view(b, c, 1, 1)
-        # return x * y.expand_as(x)
+
         return out
 
 class spatialAttention(nn.Module):
@@ -140,15 +121,7 @@ class spatialAttention(nn.Module):
             nn.Conv3d(in_chan, 1, kernel_size=3, stride= 1, padding=1, bias=False),
             nn.ReLU(inplace=True)
         )
-        # self.spaAtt1 = nn.Sequential(
-            # nn.Conv3d(in_chan, 1, kernel_size=1, bias=False),
-            # nn.ReLU(inplace=True)
-        # ) # by Chao.
 
-        # self.pool_conv = nn.Sequential(
-        #     nn.Conv3d(4, 1, kernel_size=7, bias=False),
-        #     nn.Sigmoid()
-        # )
         self.pool_conv = nn.Conv3d(4, 1, kernel_size=7, stride= 1, padding=3, bias=False)
         self.pool_act = nn.Sigmoid()
     def forward(self, x):
@@ -450,9 +423,10 @@ class CSAMbasicBlock(nn.Module):
 
     
 # adapted from https://github.com/haamoon/mmtm/blob/1c81cfefad5532cfb39193b8af3840ac3346e897/mmtm.py
-class MMTM(nn.Module):
+class IPA(nn.Module):
+    # IPA: inter-phase attention
     def __init__(self, dim_ph1, dim_ph2, ratio):
-        super(MMTM, self).__init__()
+        super(IPA, self).__init__()
         # import ipdb; ipdb.set_trace()
         dim = dim_ph1 + dim_ph2
         dim_out = int(2*dim/ratio)
@@ -488,7 +462,8 @@ class MMTM(nn.Module):
 
         return ART * ART_out, PV * PV_out
 
-class scaleDecoder(nn.Module):
+# SSFE: scale-specific feature extractor. former name is scaleDecoder.
+class SSFE(nn.Module):
     def __init__(self, inChan, outChan, out_size = [3,11,15], stride=2, n_phase = 2):
         super().__init__()
         self.n_phase = n_phase
@@ -517,7 +492,7 @@ class scaleDecoder(nn.Module):
         )
     
     def forward(self, x_ph_1, x_ph_2=None):
-        out = self.mp(x_ph_1)
+        out = self.mp(x_ph_1) # outChan, 3, 11, 15
         out = self.conv1(out)
 
         if x_ph_2 is not None:
@@ -549,7 +524,7 @@ class LiverSurv(nn.Module):
 
 
         ## ART
-        self.conv1_ph1 = nn.Sequential(
+        self.Conv_in_ph1 = nn.Sequential(
             # nn.Conv3d(2,outChan_list[0],kernel_size=3,padding=1, bias=False),
             # norm(outChan_list[0]),
             # activation(),
@@ -562,11 +537,11 @@ class LiverSurv(nn.Module):
             activation()
         )
 
-        self.layer2_ph1 = CSAMbasicBlock(outChan_list[0], [outChan_list[1],outChan_list[1],outChan_list[1]],stride=stride_list[1], if_SA=False, if_CA=False,if_CAAM=False) # out: [48,64,80]
-        self.layer3_ph1 = CSAMbasicBlock(outChan_list[1], [outChan_list[2],outChan_list[2],outChan_list[2]],stride=stride_list[2], if_SA=False, if_CA=False,if_CAAM=False) # out: [24,32,40]
-        self.layer4_ph1 = CSAMbasicBlock(outChan_list[2], [outChan_list[3],outChan_list[3],outChan_list[3]],stride=stride_list[3], if_SA=False, if_CA=False,if_CAAM=False) # out: [12,16,20]
-        self.layer5_ph1 = CSAMbasicBlock(outChan_list[3], [outChan_list[4],outChan_list[4],outChan_list[4]],stride=stride_list[4], if_SA=False, if_CA=False,if_CAAM=False)# out: [6,8,10]
-        self.layer6_ph1 = CSAMbasicBlock(outChan_list[4], [outChan_list[5],outChan_list[5],outChan_list[5]],stride=stride_list[5], if_SA=False, if_CA=False,if_CAAM=False) # out: [3,4,5]
+        self.Conv_hidden_1_ph1 = CSAMbasicBlock(outChan_list[0], [outChan_list[1],outChan_list[1],outChan_list[1]],stride=stride_list[1], if_SA=False, if_CA=False,if_CAAM=False) # out: [48,64,80]
+        self.Conv_hidden_2_ph1 = CSAMbasicBlock(outChan_list[1], [outChan_list[2],outChan_list[2],outChan_list[2]],stride=stride_list[2], if_SA=False, if_CA=False,if_CAAM=False) # out: [24,32,40]
+        self.Conv_hidden_3_ph1 = CSAMbasicBlock(outChan_list[2], [outChan_list[3],outChan_list[3],outChan_list[3]],stride=stride_list[3], if_SA=False, if_CA=False,if_CAAM=False) # out: [12,16,20]
+        self.Conv_hidden_4_ph1 = CSAMbasicBlock(outChan_list[3], [outChan_list[4],outChan_list[4],outChan_list[4]],stride=stride_list[4], if_SA=False, if_CA=False,if_CAAM=False)# out: [6,8,10]
+        self.Conv_hidden_5_ph1 = CSAMbasicBlock(outChan_list[4], [outChan_list[5],outChan_list[5],outChan_list[5]],stride=stride_list[5], if_SA=False, if_CA=False,if_CAAM=False) # out: [3,4,5]
 
 
         #
@@ -581,7 +556,7 @@ class LiverSurv(nn.Module):
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase==2:
             ## PV
-            self.conv1_ph2 = nn.Sequential(
+            self.Conv_in_ph2 = nn.Sequential(
             # nn.Conv3d(2,outChan_list[0],kernel_size=3,padding=1, bias=False),
             # norm(outChan_list[0]),
             # activation(),
@@ -594,18 +569,18 @@ class LiverSurv(nn.Module):
             activation()
         )
 
-            self.layer2_ph2 = CSAMbasicBlock(outChan_list[0], [outChan_list[1],outChan_list[1],outChan_list[1]],stride=stride_list[1], if_SA=False, if_CA=False,if_CAAM=False) # out: [48,64,80]
-            self.layer3_ph2 = CSAMbasicBlock(outChan_list[1], [outChan_list[2],outChan_list[2],outChan_list[2]],stride=stride_list[2], if_SA=False, if_CA=False,if_CAAM=False) # out: [24,32,40]
-            self.layer4_ph2 = CSAMbasicBlock(outChan_list[2], [outChan_list[3],outChan_list[3],outChan_list[3]],stride=stride_list[3], if_SA=False, if_CA=False,if_CAAM=False) # out: [12,16,20]
-            self.layer5_ph2 = CSAMbasicBlock(outChan_list[3], [outChan_list[4],outChan_list[4],outChan_list[4]],stride=stride_list[4], if_SA=False, if_CA=False,if_CAAM=False)# out: [6,8,10]
-            self.layer6_ph2 = CSAMbasicBlock(outChan_list[4], [outChan_list[5],outChan_list[5],outChan_list[5]],stride=stride_list[5], if_SA=False, if_CA=False,if_CAAM=False) # out: [3,4,5]
+            self.Conv_hidden_1_ph2 = CSAMbasicBlock(outChan_list[0], [outChan_list[1],outChan_list[1],outChan_list[1]],stride=stride_list[1], if_SA=False, if_CA=False,if_CAAM=False) # out: [48,64,80]
+            self.Conv_hidden_2_ph2 = CSAMbasicBlock(outChan_list[1], [outChan_list[2],outChan_list[2],outChan_list[2]],stride=stride_list[2], if_SA=False, if_CA=False,if_CAAM=False) # out: [24,32,40]
+            self.Conv_hidden_3_ph2 = CSAMbasicBlock(outChan_list[2], [outChan_list[3],outChan_list[3],outChan_list[3]],stride=stride_list[3], if_SA=False, if_CA=False,if_CAAM=False) # out: [12,16,20]
+            self.Conv_hidden_4_ph2 = CSAMbasicBlock(outChan_list[3], [outChan_list[4],outChan_list[4],outChan_list[4]],stride=stride_list[4], if_SA=False, if_CA=False,if_CAAM=False)# out: [6,8,10]
+            self.Conv_hidden_5_ph2 = CSAMbasicBlock(outChan_list[4], [outChan_list[5],outChan_list[5],outChan_list[5]],stride=stride_list[5], if_SA=False, if_CA=False,if_CAAM=False) # out: [3,4,5]
 
-            ## MMTM
-            self.mmtm2 = MMTM(outChan_list[0],outChan_list[0],4)
-            self.mmtm3 = MMTM(outChan_list[1],outChan_list[1],4)
-            self.mmtm4 = MMTM(outChan_list[2],outChan_list[2],4)
-            self.mmtm5 = MMTM(outChan_list[3],outChan_list[3],4)
-            self.mmtm6 = MMTM(outChan_list[4],outChan_list[4],4)
+            ## IPA
+            self.IPA1 = IPA(outChan_list[0],outChan_list[0],4)
+            self.IPA2 = IPA(outChan_list[1],outChan_list[1],4)
+            self.IPA3 = IPA(outChan_list[2],outChan_list[2],4)
+            self.IPA4 = IPA(outChan_list[3],outChan_list[3],4)
+            self.IPA5 = IPA(outChan_list[4],outChan_list[4],4)
 
 
             self.convBlock_fuse = nn.Sequential(
@@ -618,10 +593,10 @@ class LiverSurv(nn.Module):
             )
         
         # multiscale_decoder
-        self.scaleDecoder1 = scaleDecoder(outChan_list[0], outChan_list[0])
-        self.scaleDecoder2 = scaleDecoder(outChan_list[1], outChan_list[0])
-        self.scaleDecoder3 = scaleDecoder(outChan_list[2], outChan_list[0])
-        self.scaleDecoder4 = scaleDecoder(outChan_list[3], outChan_list[0])
+        self.SSFE1 = SSFE(outChan_list[0], outChan_list[0])
+        self.SSFE2 = SSFE(outChan_list[1], outChan_list[0])
+        self.SSFE3 = SSFE(outChan_list[2], outChan_list[0])
+        self.SSFE4 = SSFE(outChan_list[3], outChan_list[0])
 
 
         self.decoder_deepest = nn.Sequential(
@@ -675,19 +650,19 @@ class LiverSurv(nn.Module):
         #1
         # model_res['featMapSize'].append(x_ph1.shape)
 
-        x1_ph1 = self.conv1_ph1(x_ph1) # [6, 16, 48,176,240]
+        x1_ph1 = self.Conv_in_ph1(x_ph1) # [6, 16, 48,176,240]
 
         if self.n_phase==1:
             pass
         elif self.n_phase>2:
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase==2:
-            x1_ph2 = self.conv1_ph2(x_ph2) # [6, 16, 48,176,240]
+            x1_ph2 = self.Conv_in_ph2(x_ph2) # [6, 16, 48,176,240]
 
         if self.n_phase==1:
-            scale_fc = self.scaleDecoder1(x1_ph1)
+            scale_fc = self.SSFE1(x1_ph1)
         elif self.n_phase==2:
-            scale_fc = self.scaleDecoder1(x1_ph1, x1_ph2)
+            scale_fc = self.SSFE1(x1_ph1, x1_ph2)
         scale_fc_list.append(scale_fc)
 
         # model_res['featMapSize'].append(x1_ph1.shape)
@@ -702,14 +677,14 @@ class LiverSurv(nn.Module):
         elif self.n_phase>2:
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase==2:
-            x1_ph1, x1_ph2 = self.mmtm2(x1_ph1, x1_ph2)
-            x1_ph2,cls_score_ph2, cam0_ph2 = self.layer2_ph2(x1_ph2) # [6,32,48,88,120]
-        x1_ph1,cls_score_ph1, cam0_ph1 = self.layer2_ph1(x1_ph1) # [6]
+            x1_ph1, x1_ph2 = self.IPA1(x1_ph1, x1_ph2)
+            x1_ph2,cls_score_ph2, cam0_ph2 = self.Conv_hidden_1_ph2(x1_ph2) # [6,32,48,88,120]
+        x1_ph1,cls_score_ph1, cam0_ph1 = self.Conv_hidden_1_ph1(x1_ph1) # [6]
 
         if self.n_phase==1:
-            scale_fc = self.scaleDecoder2(x1_ph1)
+            scale_fc = self.SSFE2(x1_ph1)
         elif self.n_phase==2:
-            scale_fc = self.scaleDecoder2(x1_ph1, x1_ph2)
+            scale_fc = self.SSFE2(x1_ph1, x1_ph2)
         scale_fc_list.append(scale_fc)
 
         # model_res["cam"].append(x1_ph1)
@@ -726,14 +701,14 @@ class LiverSurv(nn.Module):
         elif self.n_phase>2:
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase==2:
-            x1_ph1, x1_ph2 = self.mmtm3(x1_ph1, x1_ph2)
-            x1_ph2 ,cls_score_ph2, cam0_ph2 = self.layer3_ph2(x1_ph2) # [6,64,24,44,60]
-        x1_ph1,cls_score_ph1, cam0_ph1 = self.layer3_ph1(x1_ph1) # [6]
+            x1_ph1, x1_ph2 = self.IPA2(x1_ph1, x1_ph2)
+            x1_ph2 ,cls_score_ph2, cam0_ph2 = self.Conv_hidden_2_ph2(x1_ph2) # [6,64,24,44,60]
+        x1_ph1,cls_score_ph1, cam0_ph1 = self.Conv_hidden_2_ph1(x1_ph1) # [6]
 
         if self.n_phase==1:
-            scale_fc = self.scaleDecoder3(x1_ph1)
+            scale_fc = self.SSFE3(x1_ph1)
         elif self.n_phase==2:
-            scale_fc = self.scaleDecoder3(x1_ph1, x1_ph2)
+            scale_fc = self.SSFE3(x1_ph1, x1_ph2)
         scale_fc_list.append(scale_fc)
         
         # model_res['cls_score_art'].append(cls_score_ph1)
@@ -750,14 +725,14 @@ class LiverSurv(nn.Module):
         elif self.n_phase>2:
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase==2:
-            x1_ph1, x1_ph2 = self.mmtm4(x1_ph1, x1_ph2)
-            x1_ph2,cls_score_ph2, cam0_ph2 = self.layer4_ph2(x1_ph2) # [6,128,24,40,56]
-        x1_ph1,cls_score_ph1, cam0_ph1 = self.layer4_ph1(x1_ph1) # [6]
+            x1_ph1, x1_ph2 = self.IPA3(x1_ph1, x1_ph2)
+            x1_ph2,cls_score_ph2, cam0_ph2 = self.Conv_hidden_3_ph2(x1_ph2) # [6,128,12,22,30]
+        x1_ph1,cls_score_ph1, cam0_ph1 = self.Conv_hidden_3_ph1(x1_ph1) # [6]
 
         if self.n_phase==1:
-            scale_fc = self.scaleDecoder4(x1_ph1)
+            scale_fc = self.SSFE4(x1_ph1)
         elif self.n_phase==2:
-            scale_fc = self.scaleDecoder4(x1_ph1, x1_ph2)
+            scale_fc = self.SSFE4(x1_ph1, x1_ph2)
         scale_fc_list.append(scale_fc)
         
         # model_res['cls_score_art'].append(cls_score_ph1)
@@ -774,9 +749,9 @@ class LiverSurv(nn.Module):
         elif self.n_phase>2:
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase==2:
-            x1_ph1, x1_ph2 = self.mmtm5(x1_ph1, x1_ph2)
-            x1_ph2,cls_score_ph2, cam0_ph2 = self.layer5_ph2(x1_ph2) # [6,256,24,40,56]
-        x1_ph1,cls_score_ph1, cam0_ph1 = self.layer5_ph1(x1_ph1) # [6]
+            x1_ph1, x1_ph2 = self.IPA4(x1_ph1, x1_ph2)
+            x1_ph2,cls_score_ph2, cam0_ph2 = self.Conv_hidden_4_ph2(x1_ph2) # [6,256,6,11,15]
+        x1_ph1,cls_score_ph1, cam0_ph1 = self.Conv_hidden_4_ph1(x1_ph1) # [6]
 
         # model_res['cls_score_art'].append(cls_score_ph1)
         # model_res['cls_score_pv'].append(cls_score_ph2)
@@ -791,9 +766,9 @@ class LiverSurv(nn.Module):
         # elif self.n_phase>2:
         #     raise ValueError('n_phase should be 1 or 2')
         # elif self.n_phase==2:
-        #     x1_ph1, x1_ph2 = self.mmtm6(x1_ph1, x1_ph2)
-        #     x1_ph2 ,cls_score_ph2, cam0_ph2 = self.layer6_ph2(x1_ph2) # [6,512,3,4,5]
-        # x1_ph1 ,cls_score_ph1, cam0_ph1 = self.layer6_ph1(x1_ph1) #
+        #     x1_ph1, x1_ph2 = self.IPA5(x1_ph1, x1_ph2)
+        #     x1_ph2 ,cls_score_ph2, cam0_ph2 = self.Conv_hidden_5_ph2(x1_ph2) # [6,512,3,4,5]
+        # x1_ph1 ,cls_score_ph1, cam0_ph1 = self.Conv_hidden_5_ph1(x1_ph1) #
         # # model_res['cls_score_art'].append(cls_score_ph1)
         # # model_res['cls_score_pv'].append(cls_score_ph2)
         # model_res['featMapSize'].append(x1_ph1.shape)
@@ -813,11 +788,11 @@ class LiverSurv(nn.Module):
         elif self.n_phase>2:
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase==2:
-            x1 = torch.cat((x1_ph1, x1_ph2), dim=1)
-            x1 = self.convBlock_fuse(x1) # [6,256,3,4,5]
+            x1 = torch.cat((x1_ph1, x1_ph2), dim=1) # x1: 512,6,11,15
+            x1 = self.convBlock_fuse(x1) # [6,128,6,11,15]
 
             # flatten
-            x1 = torch.flatten(x1,1)
+            x1 = torch.flatten(x1,1) # x1: 126720
 
         logits_dict = dict() # this is a 'risk score', which represents the logarithm of the ratio of teh individual hazard to the baseline hazard. so, the hazard ratio?
         
@@ -836,21 +811,15 @@ class LiverSurv(nn.Module):
             else:
                 pass
             logits_dict[i] = self.classifier_dict[i](decoder_out)
-            # logits_dict[i] = self.LeakyReLu_dict[i](logits_dict[i]) # why olivier 2020 Nature machine intelligence paper add this step.是不是因为基线风险h0(t)肯定是最低的，有任何危险因素存在的h(t)风险值肯定都比h0(t)高，所以这里使用negative_lope=-1的leakyReLu以限制网络输出始终大于0，这样h(t)/h0(t)始终大于等于1.
-            # logits_dict[i] = torch.clamp(logits_dict[i], max=88.7) #here, the tensors dtype are float32, so if >88.7, torch.exp() in the cox loss will give inf and the final output of cox loss will be NaN. In fact, this does not solve the problem thoroughly. as the following sum operation will also give number >88.7 and result in inf.   
-        
         model_res['logits'] = logits_dict
         return model_res
 
 
 if __name__ == "__main__":
     task_names = ['recur'] # 'recur','death'
-    x_ph2 = torch.randn([6,2,48,352,480]).cuda()
-    x_ph1 = torch.randn([6,2,48,352,480]).cuda()
+    x_ph2 = torch.randn([1,2,48,352,480]).cuda()
+    x_ph1 = torch.randn([1,2,48,352,480]).cuda()
     clin_data = torch.randn([6,5]).cuda()
-    # bin_size=[]
-    # for bin_h, bin_w in zip((2,4,4,4), (4)):
-    #     print(bin_h,bin_w)
 
     self = LiverSurv(task_names, n_phase=2, clin=False)
     self = nn.parallel.DataParallel(self,device_ids=[0,1]).cuda()
