@@ -336,26 +336,6 @@ class CAAM(nn.Module):
             nn.Conv3d(feat_in * 2, num_classes, kernel_size=1)
         )
 
-        #### hide ####
-        # self.pool_cam = nn.AdaptiveAvgPool3d(bin_size)
-        # self.sigmoid = nn.Sigmoid()
-
-        # bin_num = bin_size[0] * bin_size[1] * bin_size[2]
-
-        # self.gcn = GCN(bin_num, feat_in)
-        # self.fuse = nn.Conv2d(bin_num, 1, kernel_size=1) # input is 2d.
-        # self.proj_query = nn.Linear(feat_in, feat_inner)
-        # self.proj_key = nn.Linear(feat_in, feat_inner)
-        # self.proj_value = nn.Linear(feat_in, feat_inner)
-
-        # self.conv_out = nn.Sequential(
-        #     nn.Conv3d(feat_inner, feat_in, kernel_size=1, bias=False),
-        #     norm(feat_in),
-        #     nn.ReLU(inplace=True)
-        # )
-        # self.scale = feat_inner ** -0.5
-        # self.relu = nn.ReLU(inplace=True)
-        #### hide ####
 
         # self.camAtt = spatialAttention(num_classes)
 
@@ -372,7 +352,44 @@ class CAAM(nn.Module):
         # cam = self.conv_cam(self.dropout(x))  # [B, K,z,y,x]
         cam0 = self.conv_cam(x)  # [B, K,z,y,x]
 
-        
+        #### hide ###
+        # cls_score = self.sigmoid(self.pool_cam(cam0)) # [B,K, bin_num_z,bin_num_y, bin_num_x] # 为何使用sigmoid而不是softmax？因为一个像素点可能属于多个类别？by Chao.
+
+        # # residual = x # [B, C, z,y,x]
+        # cam = patch_split(cam0, self.bin_size) # [B, bin_num_h * bin_num_w, rH, rW, K]
+        # x = patch_split(x, self.bin_size) # [B, bin_num_h * bin_num_w, rH, rW, C]
+
+        # B = cam.shape[0]
+        # rZ = cam.shape[2]
+        # rH = cam.shape[3]
+        # rW = cam.shape[4]
+        # K = cam.shape[-1]
+        # C = x.shape[-1]
+        # cam = cam.view(B, -1, rZ*rH*rW, K) # [B, bin_num_z * bin_num_h * bin_num_w, rZ * rH * rW, K]
+        # x = x.view(B, -1, rZ*rH*rW, C) # [B, bin_num_z * bin_num_h * bin_num_w, rZ * rH * rW, C]
+
+        # bin_confidence = cls_score.view(B,K,-1).transpose(1,2).unsqueeze(3) # [B, bin_num_z * bin_num_h * bin_num_w, K, 1]
+        # pixel_confidence = F.softmax(cam, dim=2) # [B, bin_num_z * bin_num_h * bin_num_w, rZ * rH * rW, K]
+
+        # local_feats = torch.matmul(pixel_confidence.transpose(2, 3), x) * bin_confidence # [B, bin_num_z * bin_num_h * bin_num_w, K, C]
+        # local_feats = self.gcn(local_feats) # [B, bin_num_z * bin_num_h * bin_num_w, K, C]
+        # global_feats = self.fuse(local_feats) # [B, 1, K, C]
+        # global_feats = self.relu(global_feats).repeat(1, x.shape[1], 1, 1) # [B, bin_num_z * bin_num_h * bin_num_w, K, C]
+
+        # query = self.proj_query(x) # [B, bin_num_z * bin_num_h * bin_num_w, rZ * rH * rW, C//2]
+        # key = self.proj_key(local_feats) # [B, bin_num_z * bin_num_h * bin_num_w, K, C//2]
+        # value = self.proj_value(global_feats) # [B, bin_num_z * bin_num_h * bin_num_w, K, C//2]
+
+        # aff_map = torch.matmul(query, key.transpose(2, 3)) # [B, bin_num_z * bin_num_h * bin_num_w, rZ * rH * rW, K]
+        # aff_map = F.softmax(aff_map, dim=-1)
+        # out = torch.matmul(aff_map, value) # [B, bin_num_z * bin_num_h * bin_num_w, rZ * rH * rW, C]
+
+        # out = out.view(B, -1, rZ, rH, rW, value.shape[-1]) # [B, bin_num_z * bin_num_h * bin_num_w, rZ, rH, rW, C]
+        # out = patch_recover(out, self.bin_size) # [B, C, Z, H, W]
+
+        # # out = residual + self.conv_out(out)
+        # out = self.conv_out(out)
+        #### hide ###
         cls_score = None
 
         # cam0 = self.camAtt(cam0)
@@ -435,9 +452,10 @@ class CSAMbasicBlock(nn.Module):
 
 
 # adapted from https://github.com/haamoon/mmtm/blob/1c81cfefad5532cfb39193b8af3840ac3346e897/mmtm.py
-class MMTM(nn.Module):
+class IPA(nn.Module):
+    # IPA: inter-phase attention
     def __init__(self, dim_ph1, dim_ph2, ratio):
-        super(MMTM, self).__init__()
+        super(IPA, self).__init__()
         # import ipdb; ipdb.set_trace()
         dim = dim_ph1 + dim_ph2
         dim_out = int(2 * dim / ratio)
@@ -473,8 +491,8 @@ class MMTM(nn.Module):
 
         return ART * ART_out, PV * PV_out
 
-
-class scaleDecoder(nn.Module):
+# SSFE: scale-specific feature extractor. former name is scaleDecoder.
+class SSFE(nn.Module):
     def __init__(self, inChan, outChan, out_size=[3, 11, 15], stride=2, n_phase=2):
         super().__init__()
         self.n_phase = n_phase
@@ -517,7 +535,7 @@ class scaleDecoder(nn.Module):
         return out
 
 
-class TumorSurv(nn.Module):
+class tumorSurv(nn.Module):
     # refer: https://codeocean.com/capsule/5978670/tree/v1. this code is from Olivier lab in Stanford
     # 根据LiverNet_CAAM8Mmtm_xyzMedian_resizeToMedian的实验结果：1/4分辨率层的seg loss一直比1/8,1/16,1/32这三层的大很多，而后面三层的seg loss水平差不多。因此本网络只保留后三层的seg输出。
     # 另外还做了其他改动，例如增加encoder的宽度
@@ -537,7 +555,7 @@ class TumorSurv(nn.Module):
         self.stride_list = stride_list = [(1, 2, 2), (1, 2, 2), 2, 2, 2, 2]  # stride: int or tuple
 
         ## ART
-        self.conv1_ph1 = nn.Sequential(
+        self.Conv_in_ph1 = nn.Sequential(
             # nn.Conv3d(2,outChan_list[0],kernel_size=3,padding=1, bias=False),
             # norm(outChan_list[0]),
             # activation(),
@@ -550,19 +568,11 @@ class TumorSurv(nn.Module):
             activation()
         )
 
-        self.layer2_ph1 = CSAMbasicBlock(outChan_list[0], [outChan_list[1], outChan_list[1], outChan_list[1]],
-                                         stride=stride_list[1], if_SA=False, if_CA=False,
-                                         if_CAAM=False)  # out: [48,64,80]
-        self.layer3_ph1 = CSAMbasicBlock(outChan_list[1], [outChan_list[2], outChan_list[2], outChan_list[2]],
-                                         stride=stride_list[2], if_SA=False, if_CA=False,
-                                         if_CAAM=False)  # out: [24,32,40]
-        self.layer4_ph1 = CSAMbasicBlock(outChan_list[2], [outChan_list[3], outChan_list[3], outChan_list[3]],
-                                         stride=stride_list[3], if_SA=False, if_CA=False,
-                                         if_CAAM=False)  # out: [12,16,20]
-        self.layer5_ph1 = CSAMbasicBlock(outChan_list[3], [outChan_list[4], outChan_list[4], outChan_list[4]],
-                                         stride=stride_list[4], if_SA=False, if_CA=False,
-                                         if_CAAM=False)  # out: [6,8,10]
-        self.layer6_ph1 = CSAMbasicBlock(outChan_list[4], [outChan_list[5], outChan_list[5], outChan_list[5]], stride=stride_list[5], if_SA=False, if_CA=False, if_CAAM=False)  # out: [3,4,5]
+        self.Conv_hidden_1_ph1 = CSAMbasicBlock(outChan_list[0], [outChan_list[1], outChan_list[1], outChan_list[1]], stride=stride_list[1], if_SA=False, if_CA=False, if_CAAM=False)  # out: [48,64,80]
+        self.Conv_hidden_2_ph1 = CSAMbasicBlock(outChan_list[1], [outChan_list[2], outChan_list[2], outChan_list[2]], stride=stride_list[2], if_SA=False, if_CA=False, if_CAAM=False)  # out: [24,32,40]
+        self.Conv_hidden_3_ph1 = CSAMbasicBlock(outChan_list[2], [outChan_list[3], outChan_list[3], outChan_list[3]], stride=stride_list[3], if_SA=False, if_CA=False, if_CAAM=False)  # out: [12,16,20]
+        self.Conv_hidden_4_ph1 = CSAMbasicBlock(outChan_list[3], [outChan_list[4], outChan_list[4], outChan_list[4]], stride=stride_list[4], if_SA=False, if_CA=False, if_CAAM=False)  # out: [6,8,10]
+        self.Conv_hidden_5_ph1 = CSAMbasicBlock(outChan_list[4], [outChan_list[5], outChan_list[5], outChan_list[5]], stride=stride_list[5], if_SA=False, if_CA=False, if_CAAM=False)  # out: [3,4,5]
 
         #
         if self.n_phase == 1:
@@ -576,7 +586,7 @@ class TumorSurv(nn.Module):
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase == 2:
             ## PV
-            self.conv1_ph2 = nn.Sequential(
+            self.Conv_in_ph2 = nn.Sequential(
                 # nn.Conv3d(2,outChan_list[0],kernel_size=3,padding=1, bias=False),
                 # norm(outChan_list[0]),
                 # activation(),
@@ -589,28 +599,28 @@ class TumorSurv(nn.Module):
                 activation()
             )
 
-            self.layer2_ph2 = CSAMbasicBlock(outChan_list[0], [outChan_list[1], outChan_list[1], outChan_list[1]],
+            self.Conv_hidden_1_ph2 = CSAMbasicBlock(outChan_list[0], [outChan_list[1], outChan_list[1], outChan_list[1]],
                                              stride=stride_list[1], if_SA=False, if_CA=False,
                                              if_CAAM=False)  # out: [48,64,80]
-            self.layer3_ph2 = CSAMbasicBlock(outChan_list[1], [outChan_list[2], outChan_list[2], outChan_list[2]],
+            self.Conv_hidden_2_ph2 = CSAMbasicBlock(outChan_list[1], [outChan_list[2], outChan_list[2], outChan_list[2]],
                                              stride=stride_list[2], if_SA=False, if_CA=False,
                                              if_CAAM=False)  # out: [24,32,40]
-            self.layer4_ph2 = CSAMbasicBlock(outChan_list[2], [outChan_list[3], outChan_list[3], outChan_list[3]],
+            self.Conv_hidden_3_ph2 = CSAMbasicBlock(outChan_list[2], [outChan_list[3], outChan_list[3], outChan_list[3]],
                                              stride=stride_list[3], if_SA=False, if_CA=False,
                                              if_CAAM=False)  # out: [12,16,20]
-            self.layer5_ph2 = CSAMbasicBlock(outChan_list[3], [outChan_list[4], outChan_list[4], outChan_list[4]],
+            self.Conv_hidden_4_ph2 = CSAMbasicBlock(outChan_list[3], [outChan_list[4], outChan_list[4], outChan_list[4]],
                                              stride=stride_list[4], if_SA=False, if_CA=False,
                                              if_CAAM=False)  # out: [6,8,10]
-            self.layer6_ph2 = CSAMbasicBlock(outChan_list[4], [outChan_list[5], outChan_list[5], outChan_list[5]],
+            self.Conv_hidden_5_ph2 = CSAMbasicBlock(outChan_list[4], [outChan_list[5], outChan_list[5], outChan_list[5]],
                                              stride=stride_list[5], if_SA=False, if_CA=False,
                                              if_CAAM=False)  # out: [3,4,5]
 
-            ## MMTM
-            self.mmtm2 = MMTM(outChan_list[0], outChan_list[0], 4)
-            self.mmtm3 = MMTM(outChan_list[1], outChan_list[1], 4)
-            self.mmtm4 = MMTM(outChan_list[2], outChan_list[2], 4)
-            self.mmtm5 = MMTM(outChan_list[3], outChan_list[3], 4)
-            self.mmtm6 = MMTM(outChan_list[4], outChan_list[4], 4)
+            ## IPA
+            self.IPA1 = IPA(outChan_list[0], outChan_list[0], 4)
+            self.IPA2 = IPA(outChan_list[1], outChan_list[1], 4)
+            self.IPA3 = IPA(outChan_list[2], outChan_list[2], 4)
+            self.IPA4 = IPA(outChan_list[3], outChan_list[3], 4)
+            self.IPA5 = IPA(outChan_list[4], outChan_list[4], 4)
 
             self.convBlock_fuse = nn.Sequential(
                 nn.Conv3d(outChan_list[3] * 2, 256, kernel_size=1, bias=False), #128 256
@@ -622,10 +632,10 @@ class TumorSurv(nn.Module):
             )
 
         # multiscale_decoder
-        self.scaleDecoder1 = scaleDecoder(outChan_list[0], outChan_list[0])
-        self.scaleDecoder2 = scaleDecoder(outChan_list[1], outChan_list[0])
-        self.scaleDecoder3 = scaleDecoder(outChan_list[2], outChan_list[0])
-        self.scaleDecoder4 = scaleDecoder(outChan_list[3], outChan_list[0])
+        self.SSFE1 = SSFE(outChan_list[0], outChan_list[0])
+        self.SSFE2 = SSFE(outChan_list[1], outChan_list[0])
+        self.SSFE3 = SSFE(outChan_list[2], outChan_list[0])
+        self.SSFE4 = SSFE(outChan_list[3], outChan_list[0])
 
         self.decoder_deepest = nn.Sequential(
             nn.Linear(38400, 128),  # 13440, 73728, 36864, 7680 76032  126720
@@ -677,19 +687,19 @@ class TumorSurv(nn.Module):
         # 1
         model_res['featMapSize'].append(x_ph1.shape)
         # x_ph1: [1,48,80,80]
-        x1_ph1 = self.conv1_ph1(x_ph1)  # [16,48,40,40]
+        x1_ph1 = self.Conv_in_ph1(x_ph1)  # [16,48,40,40]
 
         if self.n_phase == 1:
             pass
         elif self.n_phase > 2:
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase == 2:
-            x1_ph2 = self.conv1_ph2(x_ph2)  # 
+            x1_ph2 = self.Conv_in_ph2(x_ph2)  # 
 
         if self.n_phase == 1:
-            scale_fc = self.scaleDecoder1(x1_ph1)
+            scale_fc = self.SSFE1(x1_ph1)
         elif self.n_phase == 2:
-            scale_fc = self.scaleDecoder1(x1_ph1, x1_ph2)
+            scale_fc = self.SSFE1(x1_ph1, x1_ph2)
         scale_fc_list.append(scale_fc)
 
         model_res['featMapSize'].append(x1_ph1.shape)
@@ -700,14 +710,14 @@ class TumorSurv(nn.Module):
         elif self.n_phase > 2:
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase == 2:
-            x1_ph1, x1_ph2 = self.mmtm2(x1_ph1, x1_ph2)
-            x1_ph2, cls_score_ph2, cam0_ph2 = self.layer2_ph2(x1_ph2)  # [32,48,20,20]
-        x1_ph1, cls_score_ph1, cam0_ph1 = self.layer2_ph1(x1_ph1)  # [6]
+            x1_ph1, x1_ph2 = self.IPA1(x1_ph1, x1_ph2)
+            x1_ph2, cls_score_ph2, cam0_ph2 = self.Conv_hidden_1_ph2(x1_ph2)  # [32,48,20,20]
+        x1_ph1, cls_score_ph1, cam0_ph1 = self.Conv_hidden_1_ph1(x1_ph1)  # [6]
 
         if self.n_phase == 1:
-            scale_fc = self.scaleDecoder2(x1_ph1)
+            scale_fc = self.SSFE2(x1_ph1)
         elif self.n_phase == 2:
-            scale_fc = self.scaleDecoder2(x1_ph1, x1_ph2)
+            scale_fc = self.SSFE2(x1_ph1, x1_ph2)
         scale_fc_list.append(scale_fc)
 
         model_res["cam"].append(x1_ph1)
@@ -724,14 +734,14 @@ class TumorSurv(nn.Module):
         elif self.n_phase > 2:
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase == 2:
-            x1_ph1, x1_ph2 = self.mmtm3(x1_ph1, x1_ph2)
-            x1_ph2, cls_score_ph2, cam0_ph2 = self.layer3_ph2(x1_ph2)  # [64,24,10,10]
-        x1_ph1, cls_score_ph1, cam0_ph1 = self.layer3_ph1(x1_ph1)  # [6]
+            x1_ph1, x1_ph2 = self.IPA2(x1_ph1, x1_ph2)
+            x1_ph2, cls_score_ph2, cam0_ph2 = self.Conv_hidden_2_ph2(x1_ph2)  # [64,24,10,10]
+        x1_ph1, cls_score_ph1, cam0_ph1 = self.Conv_hidden_2_ph1(x1_ph1)  # [6]
 
         if self.n_phase == 1:
-            scale_fc = self.scaleDecoder3(x1_ph1)
+            scale_fc = self.SSFE3(x1_ph1)
         elif self.n_phase == 2:
-            scale_fc = self.scaleDecoder3(x1_ph1, x1_ph2)
+            scale_fc = self.SSFE3(x1_ph1, x1_ph2)
         scale_fc_list.append(scale_fc)
 
         model_res['cls_score_art'].append(cls_score_ph1)
@@ -748,14 +758,14 @@ class TumorSurv(nn.Module):
         elif self.n_phase > 2:
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase == 2:
-            x1_ph1, x1_ph2 = self.mmtm4(x1_ph1, x1_ph2)
-            x1_ph2, cls_score_ph2, cam0_ph2 = self.layer4_ph2(x1_ph2)  # [128,12,5,5]
-        x1_ph1, cls_score_ph1, cam0_ph1 = self.layer4_ph1(x1_ph1)  # [6]
+            x1_ph1, x1_ph2 = self.IPA3(x1_ph1, x1_ph2)
+            x1_ph2, cls_score_ph2, cam0_ph2 = self.Conv_hidden_3_ph2(x1_ph2)  # [128,12,5,5]
+        x1_ph1, cls_score_ph1, cam0_ph1 = self.Conv_hidden_3_ph1(x1_ph1)  # [6]
 
         if self.n_phase == 1:
-            scale_fc = self.scaleDecoder4(x1_ph1)
+            scale_fc = self.SSFE4(x1_ph1)
         elif self.n_phase == 2:
-            scale_fc = self.scaleDecoder4(x1_ph1, x1_ph2)
+            scale_fc = self.SSFE4(x1_ph1, x1_ph2)
         scale_fc_list.append(scale_fc)
 
         model_res['cls_score_art'].append(cls_score_ph1)
@@ -765,40 +775,6 @@ class TumorSurv(nn.Module):
 
         cam0_art_list.append(cam0_ph1)
         cam0_pv_list.append(cam0_ph2)
-
-        # 5
-        # if self.n_phase == 1:
-        #     pass
-        # elif self.n_phase > 2:
-        #     raise ValueError('n_phase should be 1 or 2')
-        # elif self.n_phase == 2:
-        #     x1_ph1, x1_ph2 = self.mmtm5(x1_ph1, x1_ph2)
-        #     x1_ph2, cls_score_ph2, cam0_ph2 = self.layer5_ph2(x1_ph2)  # [6,256,24,40,56]
-        # x1_ph1, cls_score_ph1, cam0_ph1 = self.layer5_ph1(x1_ph1)  # [6]
-        # model_res['cls_score_art'].append(cls_score_ph1)
-        # model_res['cls_score_pv'].append(cls_score_ph2)
-        #
-        # model_res['featMapSize'].append(x1_ph1.shape)
-        #
-        # cam0_art_list.append(cam0_ph1)
-        # cam0_pv_list.append(cam0_ph2)
-
-        # #6
-        # if self.n_phase==1:
-        #     pass
-        # elif self.n_phase>2:
-        #     raise ValueError('n_phase should be 1 or 2')
-        # elif self.n_phase==2:
-        #     x1_ph1, x1_ph2 = self.mmtm6(x1_ph1, x1_ph2)
-        #     x1_ph2 ,cls_score_ph2, cam0_ph2 = self.layer6_ph2(x1_ph2) # [6,512,3,4,5]
-        # x1_ph1 ,cls_score_ph1, cam0_ph1 = self.layer6_ph1(x1_ph1) #
-        # # model_res['cls_score_art'].append(cls_score_ph1)
-        # # model_res['cls_score_pv'].append(cls_score_ph2)
-
-        # model_res['featMapSize'].append(x1_ph1.shape)
-
-        # # cam0_art_list.append(cam0_ph1)
-        # # cam0_pv_list.append(cam0_ph2)
 
         # collect all levels seg
         model_res['seg_pred_art'] = cam0_art_list
@@ -812,7 +788,7 @@ class TumorSurv(nn.Module):
         elif self.n_phase > 2:
             raise ValueError('n_phase should be 1 or 2')
         elif self.n_phase == 2:
-            x1 = torch.cat((x1_ph1, x1_ph2), dim=1)
+            x1 = torch.cat((x1_ph1, x1_ph2), dim=1) # x1: 256, 12, 5, 5
             x1 = self.convBlock_fuse(x1)  # 
 
             #AVE_POOL
@@ -851,7 +827,7 @@ if __name__ == "__main__":
     # for bin_h, bin_w in zip((2,4,4,4), (4)):
     #     print(bin_h,bin_w)
 
-    self = TumorSurv(task_names, n_phase=2, clin=False)
+    self = tumorSurv(task_names, n_phase=2, clin=False)
 
     model_res = self(x_ph1, x_ph2, clin_data=clin_data)
 
